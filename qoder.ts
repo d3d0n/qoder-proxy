@@ -1579,7 +1579,7 @@ function createProxyHandler(config: ProxyConfig) {
       log(`[REQ] model=${parsed.model} stream=${!!parsed.stream} tools=${parsed.tools?.length ?? 0}`);
       log("[REQ] Messages:");
       for (const msg of parsed.messages) {
-        const content = typeof msg.content === "string" ? msg.content.slice(0, 500) : JSON.stringify(msg.content).slice(0, 500);
+        const content = msg.content == null ? "(null)" : typeof msg.content === "string" ? msg.content.slice(0, 500) : JSON.stringify(msg.content).slice(0, 500);
         log(`  [${msg.role}] ${content}`);
         if (msg.tool_calls) {
           for (const tc of msg.tool_calls) {
@@ -1661,6 +1661,7 @@ export function startProxyServer(config: ProxyConfig = loadConfig()) {
   return Bun.serve({
     hostname: config.host,
     port: config.port,
+    idleTimeout: 120,
     fetch: createProxyHandler(config),
   });
 }
