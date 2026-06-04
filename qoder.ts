@@ -737,9 +737,13 @@ function buildChatBody(
   const prompt = extractLatestUserPrompt(request.messages);
   const images = extractLatestUserImages(request.messages);
   const requestId = crypto.randomUUID();
-  const hasIncomingTools = Array.isArray(request.tools) && request.tools.length > 0;
 
-  // Extract system messages into a top-level system prompt field.
+  const clientTools = Array.isArray(request.tools) && request.tools.length > 0;
+  const templateTools = Array.isArray(template?.tools) && (template!.tools as unknown[]).length > 0
+    ? (template!.tools as OpenAITool[])
+    : null;
+  const resolvedTools: OpenAITool[] = clientTools ? request.tools! : (templateTools ?? []);
+
   const systemParts: string[] = [];
   const nonSystemMessages: ChatCompletionRequest["messages"] = [];
   for (const message of request.messages) {
@@ -750,21 +754,8 @@ function buildChatBody(
     }
   }
   let systemPrompt = systemParts.join("\n\n");
-  if (!systemPrompt && hasIncomingTools && request.tools) {
-    systemPrompt = buildToolSystemPrompt(request.tools);
-  }
-
-  // Inject template system prompt if no tools and no user-provided system message.
-  const templateMessages = Array.isArray(template?.messages)
-    ? (template!.messages as unknown[])
-    : undefined;
-  if (!systemPrompt && !hasIncomingTools && templateMessages) {
-    for (const m of templateMessages) {
-      if (isRecord(m) && m.role === "system") {
-        const text = flattenContentToText(m.content as OpenAIMessageContent);
-        if (text) systemPrompt = text;
-      }
-    }
+  if (!systemPrompt && resolvedTools.length > 0) {
+    systemPrompt = buildToolSystemPrompt(resolvedTools);
   }
 
   const body: Record<string, unknown> = {
@@ -791,7 +782,7 @@ function buildChatBody(
     aliyun_user_type: tokens.userType || "personal_standard",
     system: systemPrompt,
     messages: buildQoderMessages({ ...request, messages: nonSystemMessages }),
-    tools: request.tools ?? (Array.isArray(template?.tools) ? template!.tools : []),
+    tools: resolvedTools,
     parameters: {
       max_tokens: request.max_tokens ?? 8096,
       ...(request.tool_choice !== undefined ? { tool_choice: request.tool_choice } : {}),
