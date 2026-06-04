@@ -1319,12 +1319,11 @@ async function handleChatCompletionStream(client: QoderClient, request: ChatComp
   const completionId = createCompletionId();
   const encoder = new TextEncoder();
   const includeUsage = request.stream_options?.include_usage === true;
-  const toolIndexMap = new Map<string, number>();
-  const toolCallsForUsage: ToolCallAccumulator[] = [];
-  let nextToolIndex = 0;
+
+  const upstreamToolCalls: ToolCallAccumulator[] = [];
   let sentRole = false;
-  let finishEmitted = false;
   let content = "";
+  let finishReason: string | null = null;
   let usage = zeroUsage();
 
   const stream = new ReadableStream<Uint8Array>({
@@ -1335,9 +1334,7 @@ async function handleChatCompletionStream(client: QoderClient, request: ChatComp
 
       try {
         await pumpUpstreamSse(upstream, (delta) => {
-          if (delta.usage) {
-            usage = delta.usage;
-          }
+          if (delta.usage) usage = delta.usage;
 
           if (!sentRole) {
             enqueue({
@@ -1372,71 +1369,45 @@ async function handleChatCompletionStream(client: QoderClient, request: ChatComp
           }
 
           if (delta.toolCalls) {
-            const remapped = delta.toolCalls.map((rawToolCall) => {
-              const key = typeof rawToolCall.id === "string" && rawToolCall.id
-                ? rawToolCall.id
-                : typeof rawToolCall.index === "number"
-                  ? `idx-${rawToolCall.index}`
-                  : `tool-${nextToolIndex}`;
-              let index = toolIndexMap.get(key);
-              if (index === undefined) {
-                index = nextToolIndex++;
-                toolIndexMap.set(key, index);
-              }
-              const merged = mergeToolCallDelta(toolCallsForUsage, rawToolCall, index, index);
-              return {
-                index,
-                id: merged.id,
-                type: "function",
-                function: {
-                  ...(typeof rawToolCall.function === "object" && rawToolCall.function !== null ? rawToolCall.function : {}),
-                },
-              };
-            });
-            enqueue({
-              id: completionId,
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: model.id,
-              choices: [{ index: 0, delta: { tool_calls: remapped }, finish_reason: null }],
-            });
+            for (const raw of delta.toolCalls) {
+              const idx = typeof raw.index === "number" ? raw.index : 0;
+              mergeToolCallDelta(upstreamToolCalls, raw, idx, idx);
+            }
           }
 
           if (delta.finishReason) {
-            enqueue({
-              id: completionId,
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: model.id,
-              choices: [{ index: 0, delta: {}, finish_reason: delta.finishReason }],
-            });
-            finishEmitted = true;
+            finishReason = delta.finishReason;
           }
         });
 
-        if (!finishEmitted) {
+        const completeCalls = upstreamToolCalls.filter((tc) => tc && tc.function.name);
+
+        if (completeCalls.length > 0) {
           enqueue({
             id: completionId,
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
             model: model.id,
-            choices: [{ index: 0, delta: {}, finish_reason: toolCallsForUsage.length > 0 ? "tool_calls" : "stop" }],
+            choices: [{ index: 0, delta: { tool_calls: completeCalls.map((tc, i) => ({ index: i, id: tc.id, type: "function" as const, function: { name: tc.function.name, arguments: tc.function.arguments } })) }, finish_reason: null }],
           });
         }
 
+        enqueue({
+          id: completionId,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: model.id,
+          choices: [{ index: 0, delta: {}, finish_reason: finishReason || (completeCalls.length > 0 ? "tool_calls" : "stop") }],
+        });
+
         if (includeUsage) {
-          const finalToolCalls = toolCallsForUsage.filter(Boolean).map((toolCall) => ({
-            id: toolCall.id,
-            type: toolCall.type,
-            function: { ...toolCall.function },
-          }));
           enqueue({
             id: completionId,
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
             model: model.id,
             choices: [],
-            usage: finalizeUsage(request, content, finalToolCalls, usage),
+            usage: finalizeUsage(request, content, completeCalls.map((tc) => ({ id: tc.id, type: "function" as const, function: { ...tc.function } })), usage),
           });
         }
 
@@ -1461,6 +1432,7 @@ async function handleChatCompletionStream(client: QoderClient, request: ChatComp
     },
   });
 }
+
 function extractBearerToken(request: Request): string | null {
   const auth = request.headers.get("authorization");
   if (!auth || !auth.startsWith("Bearer ")) return null;
