@@ -791,7 +791,7 @@ function buildChatBody(
     aliyun_user_type: tokens.userType || "personal_standard",
     system: systemPrompt,
     messages: buildQoderMessages({ ...request, messages: nonSystemMessages }),
-    tools: request.tools ?? [],
+    tools: request.tools ?? (Array.isArray(template?.tools) ? template!.tools : []),
     parameters: {
       max_tokens: request.max_tokens ?? 8096,
       ...(request.tool_choice !== undefined ? { tool_choice: request.tool_choice } : {}),
