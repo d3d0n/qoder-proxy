@@ -1,0 +1,14 @@
+services:
+  qoder-proxy:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - QODER_PERSONAL_TOKEN=${QODER_PERSONAL_TOKEN}
+      - QODER_RATE_LIMIT_PATH=/data/rate-limits.json
+    volumes:
+      - qoder-data:/data
+    restart: unless-stopped
+
+volumes:
+  qoder-data:
