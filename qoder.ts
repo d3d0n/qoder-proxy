@@ -86,7 +86,6 @@ export interface ProxyConfig {
   port: number;
   templatePath: string;
   urls: UpstreamUrls;
-  fallbackPat?: string;
   tokens: QoderTokens;
 }
 
@@ -1078,7 +1077,6 @@ function parseRequestBody(value: unknown): ChatCompletionRequest | Response {
 }
 
 export function loadConfig(env: Record<string, string | undefined> = Bun.env): ProxyConfig {
-  const fallbackPat = asNonEmptyString(env.QODER_PERSONAL_TOKEN);
   const machine = generateMachineIdentity();
   return {
     host: asNonEmptyString(env.HOST) || DEFAULT_HOST,
@@ -1089,9 +1087,8 @@ export function loadConfig(env: Record<string, string | undefined> = Bun.env): P
       chatUrl: asNonEmptyString(env.QODER_CHAT_URL) || DEFAULT_CHAT_URL,
       modelListUrl: asNonEmptyString(env.QODER_MODEL_LIST_URL) || DEFAULT_MODEL_LIST_URL,
     },
-    fallbackPat,
     tokens: {
-      personalToken: fallbackPat || "",
+      personalToken: "",
       securityOauthToken: asNonEmptyString(env.QODER_SECURITY_OAUTH_TOKEN),
       refreshToken: asNonEmptyString(env.QODER_REFRESH_TOKEN),
       userId: asNonEmptyString(env.QODER_USER_ID),
@@ -1480,7 +1477,6 @@ function extractBearerToken(request: Request): string | null {
 
 function createProxyHandler(config: ProxyConfig) {
   const clientsByPat = new Map<string, QoderClient>();
-  let fallbackClient: QoderClient | null = null;
 
   function getClient(pat: string): QoderClient {
     const existing = clientsByPat.get(pat);
@@ -1502,13 +1498,8 @@ function createProxyHandler(config: ProxyConfig) {
   function resolveClient(request: Request): { client: QoderClient; pat: string } | Response {
     const pat = extractBearerToken(request);
     if (pat) return { client: getClient(pat), pat };
-    if (fallbackClient) return { client: fallbackClient, pat: config.fallbackPat || "" };
-    if (config.fallbackPat) {
-      fallbackClient = new QoderClient(config);
-      return { client: fallbackClient, pat: config.fallbackPat };
-    }
     return errorResponse(
-      "Missing Authorization header. Send `Authorization: Bearer <qoder-pat>` or set QODER_PERSONAL_TOKEN env.",
+      "Missing Authorization header. Send `Authorization: Bearer <qoder-pat>`.",
       401,
       "authentication_error",
       "missing_api_key",
@@ -1534,7 +1525,6 @@ function createProxyHandler(config: ProxyConfig) {
   function flushCounts(): void {
     if (!dirty) return;
     dirty = false;
-    // Prune entries older than 2 days to keep the file small.
     const cutoff = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
     for (const key of Object.keys(requestCounts)) {
       const day = key.split("|")[2];
@@ -1605,12 +1595,10 @@ function createProxyHandler(config: ProxyConfig) {
       }
 
       const parsed = parseRequestBody(body);
-      if (parsed instanceof Response) {
-        return parsed;
-      }
+      if (parsed instanceof Response) return parsed;
       if (!resolveModel(parsed.model)) {
         return errorResponse(
-          `Unknown model: ${parsed.model}. Available models: ${QODER_MODELS.map((model) => model.id).join(", ")}`,
+          `Unknown model: ${parsed.model}. Available models: ${QODER_MODELS.map((m) => m.id).join(", ")}`,
           400,
           "invalid_request_error",
           "model_not_found",

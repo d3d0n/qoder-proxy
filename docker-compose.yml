@@ -1,14 +1,22 @@
+name: qoder
 services:
-  qoder-proxy:
+  qoder:
     build: .
-    ports:
-      - "${PORT:-3000}:3000"
+    container_name: qoder
+    restart: unless-stopped
     environment:
-      - QODER_PERSONAL_TOKEN=${QODER_PERSONAL_TOKEN}
+      - PORT=4000
       - QODER_RATE_LIMIT_PATH=/data/rate-limits.json
     volumes:
-      - qoder-data:/data
-    restart: unless-stopped
-
-volumes:
-  qoder-data:
+      - ./data:/data
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:4000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+networks:
+  proxy:
+    external: true

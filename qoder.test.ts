@@ -48,7 +48,6 @@ function makeConfig(): ProxyConfig {
       chatUrl: CHAT_URL,
       modelListUrl: MODEL_LIST_URL,
     },
-    fallbackPat: "pat_test",
     tokens: {
       personalToken: "pat_test",
       machineId: "machine-id",
@@ -94,7 +93,9 @@ test("GET /v1/models returns Qoder model ids", async () => {
   ) as typeof fetch;
 
   server = startProxyServer(makeConfig());
-  const response = await realFetch(new URL("/v1/models", server.url));
+  const response = await realFetch(new URL("/v1/models", server.url), {
+    headers: { authorization: "Bearer pat_test" },
+  });
   expect(response.status).toBe(200);
 
   const body = await response.json() as { object: string; data: Array<{ id: string }> };
@@ -140,11 +141,10 @@ test("POST /v1/chat/completions returns OpenAI-compatible JSON", async () => {
     },
     { preconnect: realFetch.preconnect },
   ) as typeof fetch;
-
   server = startProxyServer(makeConfig());
   const response = await realFetch(new URL("/v1/chat/completions", server.url), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: "Bearer pat_test" },
     body: JSON.stringify({
       model: "qd-Auto",
       messages: [{ role: "user", content: "Say hello" }],
@@ -209,7 +209,7 @@ test("POST /v1/chat/completions streams OpenAI-compatible SSE", async () => {
   server = startProxyServer(makeConfig());
   const response = await realFetch(new URL("/v1/chat/completions", server.url), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: "Bearer pat_test" },
     body: JSON.stringify({
       model: "qd-Auto",
       stream: true,
@@ -286,9 +286,8 @@ test("POST /v1/chat/completions uses per-request PAT from Authorization header",
   expect(body.choices[0]!.message.content).toBe("per-request ok");
   expect(capturedBody).toBeString();
 });
-
-test("GET /v1/models returns 401 without auth header when no fallback PAT", async () => {
-  server = startProxyServer({ ...makeConfig(), fallbackPat: undefined });
+test("returns 401 without auth header", async () => {
+  server = startProxyServer(makeConfig());
   const response = await realFetch(new URL("/v1/models", server.url));
   expect(response.status).toBe(401);
   const body = await response.json() as { error: { type: string; code: string } };

@@ -18,23 +18,26 @@ Authorization: Bearer <qoder-pat>
 
 Each unique PAT gets its own cached client with fresh auth tokens.
 
-Optionally set `QODER_PERSONAL_TOKEN` as a fallback so requests without an
-`Authorization` header still work (useful for single-user local setups).
-
 ## Optional environment
 
-- `QODER_PERSONAL_TOKEN` — fallback PAT for requests without `Authorization`
 - `HOST` — default `127.0.0.1`
 - `PORT` — default `3000`
 - `QODER_BASEPROMPT_PATH` — default `./qoder-baseprompt.json`
 - `QODER_JOB_TOKEN_URL`
 - `QODER_CHAT_URL`
 - `QODER_MODEL_LIST_URL`
+- `QODER_RATE_LIMIT_PATH` — default `./rate-limits.json`
 
 ## Run
 
 ```bash
 bun run start
+```
+
+## Docker
+
+```bash
+docker compose up -d
 ```
 
 ## OpenAI-compatible endpoints
