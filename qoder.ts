@@ -618,27 +618,8 @@ function buildToolSystemPrompt(tools: OpenAITool[]): string {
 
 export function buildQoderMessages(
   request: ChatCompletionRequest,
-  templateMessages: unknown[] | undefined,
-  hasIncomingTools: boolean,
 ): Array<Record<string, unknown>> {
-  const incomingHasSystem = request.messages.some((message) => message.role === "system");
   const result: Array<Record<string, unknown>> = [];
-
-  if (hasIncomingTools && !incomingHasSystem && request.tools) {
-    const toolPrompt = buildToolSystemPrompt(request.tools);
-    result.push({
-      role: "system",
-      content: toolPrompt,
-      contents: [{ type: "text", text: toolPrompt }],
-    });
-  } else if (!hasIncomingTools && !incomingHasSystem && Array.isArray(templateMessages)) {
-    for (const message of templateMessages) {
-      if (isRecord(message) && message.role === "system") {
-        result.push(structuredClone(message));
-      }
-    }
-  }
-
   for (const message of request.messages) {
     if (message.role === "tool") {
       result.push({
@@ -757,71 +738,91 @@ function buildChatBody(
   const images = extractLatestUserImages(request.messages);
   const requestId = crypto.randomUUID();
   const hasIncomingTools = Array.isArray(request.tools) && request.tools.length > 0;
-  const body = template ? structuredClone(template) : {};
-  const typedBody = body as Record<string, unknown>;
 
-  typedBody.request_id = requestId;
-  typedBody.chat_record_id = requestId;
-  typedBody.request_set_id = crypto.randomUUID();
-  typedBody.session_id = crypto.randomUUID();
-  typedBody.stream = true;
-  typedBody.aliyun_user_type = tokens.userType || "personal_standard";
-
-  const modelConfig = isRecord(typedBody.model_config) ? typedBody.model_config : {};
-  modelConfig.key = model.upstream;
-  modelConfig.display_name = model.displayName;
-  modelConfig.is_vl = model.vision;
-  modelConfig.is_reasoning = model.reasoning;
-  modelConfig.max_input_tokens = model.maxInputTokens;
-  modelConfig.format = modelConfig.format || "openai";
-  modelConfig.source = modelConfig.source || "system";
-  typedBody.model_config = modelConfig;
-
-  const business = isRecord(typedBody.business) ? typedBody.business : {};
-  business.id = crypto.randomUUID();
-  business.begin_at = Date.now();
-  business.name = prompt.slice(0, 30);
-  typedBody.business = business;
-
-  const chatContext = isRecord(typedBody.chat_context) ? typedBody.chat_context : {};
-  chatContext.text = { type: "text", text: prompt };
-  if (images.length > 0) {
-    chatContext.images = images;
-    chatContext.imageUrls = images.map((image) => image.image_url.url);
+  // Extract system messages into a top-level system prompt field.
+  const systemParts: string[] = [];
+  const nonSystemMessages: ChatCompletionRequest["messages"] = [];
+  for (const message of request.messages) {
+    if (message.role === "system") {
+      systemParts.push(flattenContentToText(message.content));
+    } else {
+      nonSystemMessages.push(message);
+    }
   }
-  const extra = isRecord(chatContext.extra) ? chatContext.extra : {};
-  extra.originalContent = { type: "text", text: prompt };
-  if (images.length > 0) {
-    extra.images = images;
-  }
-  const extraModelConfig = isRecord(extra.modelConfig) ? extra.modelConfig : {};
-  extraModelConfig.key = model.upstream;
-  extraModelConfig.is_reasoning = model.reasoning;
-  extra.modelConfig = extraModelConfig;
-  chatContext.extra = extra;
-  typedBody.chat_context = chatContext;
-
-  if (images.length > 0) {
-    typedBody.image_urls = images.map((image) => image.image_url.url);
+  let systemPrompt = systemParts.join("\n\n");
+  if (!systemPrompt && hasIncomingTools && request.tools) {
+    systemPrompt = buildToolSystemPrompt(request.tools);
   }
 
-  const templateMessages = Array.isArray(typedBody.messages) ? typedBody.messages : undefined;
-  typedBody.messages = buildQoderMessages(request, templateMessages, hasIncomingTools);
-
-  const parameters = isRecord(typedBody.parameters) ? typedBody.parameters : {};
-  if (typeof request.max_tokens === "number") {
-    parameters.max_tokens = request.max_tokens;
-  }
-  typedBody.parameters = parameters;
-
-  if (hasIncomingTools) {
-    typedBody.tools = request.tools;
-    if (request.tool_choice !== undefined) {
-      typedBody.tool_choice = request.tool_choice;
+  // Inject template system prompt if no tools and no user-provided system message.
+  const templateMessages = Array.isArray(template?.messages)
+    ? (template!.messages as unknown[])
+    : undefined;
+  if (!systemPrompt && !hasIncomingTools && templateMessages) {
+    for (const m of templateMessages) {
+      if (isRecord(m) && m.role === "system") {
+        const text = flattenContentToText(m.content as OpenAIMessageContent);
+        if (text) systemPrompt = text;
+      }
     }
   }
 
-  return typedBody;
+  const body: Record<string, unknown> = {
+    request_id: requestId,
+    request_set_id: requestId,
+    chat_record_id: requestId,
+    session_id: crypto.randomUUID(),
+    stream: true,
+    chat_task: "FREE_INPUT",
+    chat_context: {
+      text: { type: "text", text: prompt },
+      extra: {
+        originalContent: { type: "text", text: prompt },
+        modelConfig: { key: model.upstream, is_reasoning: model.reasoning },
+      },
+    },
+    is_reply: true,
+    is_retry: false,
+    source: 1,
+    version: "3",
+    agent_id: "agent_common",
+    task_id: "common",
+    session_type: "cli_craft",
+    aliyun_user_type: tokens.userType || "personal_standard",
+    system: systemPrompt,
+    messages: buildQoderMessages({ ...request, messages: nonSystemMessages }),
+    tools: request.tools ?? [],
+    parameters: {
+      max_tokens: request.max_tokens ?? 8096,
+      ...(request.tool_choice !== undefined ? { tool_choice: request.tool_choice } : {}),
+    },
+    model_config: {
+      key: model.upstream,
+      display_name: model.displayName,
+      is_vl: model.vision,
+      is_reasoning: model.reasoning,
+      max_input_tokens: model.maxInputTokens,
+      format: "openai",
+      source: "system",
+    },
+    business: {
+      id: crypto.randomUUID(),
+      begin_at: Date.now(),
+      name: prompt.slice(0, 30),
+    },
+  };
+
+  if (images.length > 0) {
+    (body.chat_context as Record<string, unknown>).images = images;
+    (body.chat_context as Record<string, unknown>).imageUrls = images.map((i) => i.image_url.url);
+    (body.chat_context as Record<string, unknown>).extra = {
+      ...(body.chat_context as Record<string, unknown>).extra as Record<string, unknown>,
+      images,
+    };
+    body.image_urls = images.map((i) => i.image_url.url);
+  }
+
+  return body;
 }
 
 function zeroUsage(): TokenUsage {
