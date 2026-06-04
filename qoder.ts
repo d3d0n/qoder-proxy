@@ -1573,12 +1573,76 @@ function createProxyHandler(config: ProxyConfig) {
       const rateLimited = checkRateLimit(pat, modelDef.upstream);
       if (rateLimited) return rateLimited;
 
+      console.log(`\n${"=".repeat(80)}`);
+      console.log(`[REQ] model=${parsed.model} stream=${!!parsed.stream} tools=${parsed.tools?.length ?? 0}`);
+      console.log("[REQ] Messages:");
+      for (const msg of parsed.messages) {
+        const content = typeof msg.content === "string" ? msg.content.slice(0, 500) : JSON.stringify(msg.content).slice(0, 500);
+        console.log(`  [${msg.role}] ${content}`);
+        if (msg.tool_calls) {
+          for (const tc of msg.tool_calls) {
+            console.log(`    → tool_call: ${tc.function.name}(${tc.function.arguments.slice(0, 200)})`);
+          }
+        }
+        if (msg.tool_call_id) {
+          console.log(`    → tool_result for: ${msg.tool_call_id}`);
+        }
+      }
+
       try {
-        return parsed.stream
-          ? await handleChatCompletionStream(client, parsed, request.signal)
-          : await handleChatCompletionJson(client, parsed, request.signal);
+        if (parsed.stream) {
+          const resp = await handleChatCompletionStream(client, parsed, request.signal);
+          // Log stream response by wrapping it through a tee
+          const [logStream, clientStream] = resp.body!.tee();
+          const reader = logStream.getReader();
+          const decoder = new TextDecoder();
+          let accumulated = "";
+          (async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                accumulated += decoder.decode(value, { stream: true });
+              }
+              console.log("[RES] Stream complete:");
+              for (const line of accumulated.split("\n")) {
+                if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+                try {
+                  const chunk = JSON.parse(line.slice(6));
+                  const delta = chunk.choices?.[0]?.delta;
+                  if (delta?.content) console.log(`  [content] ${delta.content.slice(0, 200)}`);
+                  if (delta?.tool_calls) {
+                    for (const tc of delta.tool_calls) {
+                      console.log(`  [tool_call] ${tc.function?.name}(${tc.function?.arguments?.slice(0, 200) ?? ""})`);
+                    }
+                  }
+                  if (chunk.choices?.[0]?.finish_reason) console.log(`  [finish] ${chunk.choices[0].finish_reason}`);
+                  if (chunk.usage) console.log(`  [usage] ${JSON.stringify(chunk.usage)}`);
+                } catch {}
+              }
+              console.log("=".repeat(80));
+            } catch {}
+          })();
+          return new Response(clientStream, { status: resp.status, headers: resp.headers });
+        }
+
+        const resp = await handleChatCompletionJson(client, parsed, request.signal);
+        const respBody = await resp.json() as any;
+        console.log("[RES] Response:");
+        const msg = respBody.choices?.[0]?.message;
+        if (msg?.content) console.log(`  [content] ${msg.content.slice(0, 500)}`);
+        if (msg?.tool_calls) {
+          for (const tc of msg.tool_calls) {
+            console.log(`  [tool_call] ${tc.function?.name}(${tc.function?.arguments?.slice(0, 200) ?? ""})`);
+          }
+        }
+        console.log(`  [finish] ${respBody.choices?.[0]?.finish_reason}`);
+        console.log(`  [usage] ${JSON.stringify(respBody.usage)}`);
+        console.log("=".repeat(80));
+        return jsonResponse(respBody);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        console.error(`[ERR] ${message}`);
         return errorResponse(message, 502, "bad_gateway", "qoder_upstream_error");
       }
     }
