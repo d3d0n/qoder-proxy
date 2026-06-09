@@ -946,16 +946,52 @@ async function pumpUpstreamSse(
   const decoder = new TextDecoder();
   let buffer = "";
 
+  const STREAM_TIMEOUT = 300_000; // 5 minutes
+  let lastActivity = Date.now();
+
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      if (Date.now() - lastActivity > STREAM_TIMEOUT) {
+        throw new Error(`Stream timeout after ${STREAM_TIMEOUT}ms`);
+      }
+
+      const readPromise = reader.read();
+      const timeoutPromise = new Promise<{ done: boolean; value?: Uint8Array }>((_, reject) => {
+        setTimeout(() => reject(new Error("Stream read timeout")), STREAM_TIMEOUT);
+      });
+
+      const { done, value } = await Promise.race([readPromise, timeoutPromise]);
       if (done) break;
+      lastActivity = Date.now();
+
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const rawLine of lines) {
         const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
         if (!line) continue;
+
+        if (line.startsWith("data:")) {
+          const dataStr = line.slice(5).trim();
+          if (dataStr && dataStr !== "[DONE]") {
+            try {
+              const wrapper = JSON.parse(dataStr);
+              const svc = wrapper.statusCodeValue;
+              if (svc && svc >= 400) {
+                const errStatus = wrapper.statusCode || "";
+                let errMsg = wrapper.message || "";
+                if (typeof errMsg === "string" && errMsg.startsWith("{")) {
+                  try { const p = JSON.parse(errMsg); errMsg = p.pricingUrl || JSON.stringify(p); } catch {}
+                }
+                throw new Error(`Qoder HTTP ${svc} ${errStatus}: ${errMsg.slice(0, 200) || "rate limited or quota exceeded"}`);
+              }
+            } catch (e) {
+              // If it's our own thrown error, re-throw it. Otherwise ignore parse errors.
+              if (e instanceof Error && e.message.startsWith("Qoder HTTP")) throw e;
+            }
+          }
+        }
+
         const parsed = parseSseLine(line);
         if (parsed) {
           await onDelta(parsed);
@@ -1414,10 +1450,14 @@ async function handleChatCompletionStream(client: QoderClient, request: ChatComp
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        enqueue({ error: { message, type: "api_error" } });
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        if (message.includes("cancelled") || message.includes("aborted") || message.includes("closed")) {
+          // Client disconnected
+        } else {
+          enqueue({ error: { message, type: "api_error" } });
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        }
       } finally {
-        controller.close();
+        try { controller.close(); } catch {}
       }
     },
   });
