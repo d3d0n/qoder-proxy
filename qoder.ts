@@ -2,16 +2,35 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const COSY_VERSION = "0.1.43";
+const COSY_VERSION = "1.0.22";
 const APPCODE = "cosy";
 const SIG_SECRET = "d2FyLCB3YXIgbmV2ZXIgY2hhbmdlcw==";
 const DEFAULT_JOB_TOKEN_URL = "https://center.qoder.sh/algo/api/v3/user/jobToken?Encode=1";
 const DEFAULT_CHAT_URL =
-  "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+  "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
 const DEFAULT_MODEL_LIST_URL = "https://api2.qoder.sh/algo/api/v2/model/list?Encode=1";
 const DEFAULT_TEMPLATE_PATH = path.join(import.meta.dir, "qoder-baseprompt.json");
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
+
+const USER_STATUS_URL = "https://center.qoder.sh/algo/api/v3/user/status?Encode=1";
+const QOTA_USAGE_URL = "https://openapi.qoder.sh/api/v2/quota/usage";
+const ACTIVITY_URL = "https://openapi.qoder.sh/algo/api/v2/activity";
+
+const BUSINESS_PRODUCT = "cli";
+const BUSINESS_TYPE = "agent";
+const BUSINESS_VERSION = "1.0.22";
+const COSY_SCENE = "assistant";
+
+export function openApiHeaders(securityOauthToken: string): Record<string, string> {
+  return {
+    Accept: "application/json",
+    Authorization: `Bearer ${securityOauthToken}`,
+    "Cosy-ClientType": "5",
+    "Cosy-Version": COSY_VERSION,
+    "User-Agent": "qoder/" + COSY_VERSION,
+  };
+}
 
 const SERVER_PUBKEY_PEM = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
@@ -31,6 +50,15 @@ for (let i = 0; i < 64; i++) {
   S2C[STD_ALPHABET.charCodeAt(i)] = CUSTOM_ALPHABET.charCodeAt(i);
 }
 S2C["=".charCodeAt(0)] = CUSTOM_PAD.charCodeAt(0);
+
+const C2S = new Uint8Array(128);
+for (let i = 0; i < 128; i++) {
+  C2S[i] = 255;
+}
+for (let i = 0; i < 64; i++) {
+  C2S[CUSTOM_ALPHABET.charCodeAt(i)] = STD_ALPHABET.charCodeAt(i);
+}
+C2S[CUSTOM_PAD.charCodeAt(0)] = "=".charCodeAt(0);
 
 export interface QoderTokens {
   personalToken: string;
@@ -202,6 +230,8 @@ interface BearerCallOptions {
   url: string;
   body?: unknown;
   method?: "GET" | "POST";
+  extraHeaders?: Record<string, string>;
+  stream?: boolean;
   signal?: AbortSignal;
 }
 
@@ -212,23 +242,24 @@ interface QoderModelDef {
   maxInputTokens: number;
   vision: boolean;
   reasoning: boolean;
+  price_factor: number;
 }
 
 const MODEL_CREATED_AT = Math.floor(Date.now() / 1000);
 
 export const QODER_MODELS: readonly QoderModelDef[] = [
-  { id: "qd-Auto", upstream: "auto", displayName: "Auto", maxInputTokens: 180_000, vision: true, reasoning: false },
-  { id: "qd-Ultimate", upstream: "ultimate", displayName: "Ultimate", maxInputTokens: 180_000, vision: true, reasoning: true },
-  { id: "qd-Performance", upstream: "performance", displayName: "Performance", maxInputTokens: 272_000, vision: true, reasoning: false },
-  { id: "qd-Efficient", upstream: "efficient", displayName: "Efficient", maxInputTokens: 180_000, vision: true, reasoning: false },
-  { id: "qd-Lite", upstream: "lite", displayName: "Lite", maxInputTokens: 180_000, vision: false, reasoning: false },
-  { id: "qd-Qwen3.7-Max", upstream: "qmodel_latest", displayName: "Qwen3.7-Max", maxInputTokens: 180_000, vision: true, reasoning: false },
-  { id: "qd-Qwen3.6-Plus", upstream: "qmodel", displayName: "Qwen3.6-Plus", maxInputTokens: 180_000, vision: true, reasoning: false },
-  { id: "qd-DeepSeek-V4-Pro", upstream: "dmodel", displayName: "DeepSeek-V4-Pro", maxInputTokens: 180_000, vision: true, reasoning: true },
-  { id: "qd-DeepSeek-V4-Flash", upstream: "dfmodel", displayName: "DeepSeek-V4-Flash", maxInputTokens: 180_000, vision: true, reasoning: true },
-  { id: "qd-GLM-5.1", upstream: "gm51model", displayName: "GLM-5.1", maxInputTokens: 180_000, vision: true, reasoning: true },
-  { id: "qd-Kimi-K2.6", upstream: "kmodel", displayName: "Kimi-K2.6", maxInputTokens: 256_000, vision: true, reasoning: false },
-  { id: "qd-MiniMax-M2.7", upstream: "mmodel", displayName: "MiniMax-M2.7", maxInputTokens: 180_000, vision: true, reasoning: false },
+  { id: "qd-Auto", upstream: "auto", displayName: "Auto", maxInputTokens: 180_000, vision: true, reasoning: false, price_factor: 1 },
+  { id: "qd-Ultimate", upstream: "ultimate", displayName: "Ultimate", maxInputTokens: 180_000, vision: true, reasoning: true, price_factor: 1.6 },
+  { id: "qd-Performance", upstream: "performance", displayName: "Performance", maxInputTokens: 272_000, vision: true, reasoning: false, price_factor: 1.1 },
+  { id: "qd-Efficient", upstream: "efficient", displayName: "Efficient", maxInputTokens: 180_000, vision: true, reasoning: false, price_factor: 0.3 },
+  { id: "qd-Lite", upstream: "lite", displayName: "Lite", maxInputTokens: 180_000, vision: false, reasoning: false, price_factor: 0 },
+  { id: "qd-Qwen3.7-Max", upstream: "qmodel_latest", displayName: "Qwen3.7-Max", maxInputTokens: 1_000_000, vision: true, reasoning: false, price_factor: 0.2 },
+  { id: "qd-Qwen3.6-Plus", upstream: "qmodel", displayName: "Qwen3.6-Plus", maxInputTokens: 180_000, vision: true, reasoning: false, price_factor: 0.2 },
+  { id: "qd-DeepSeek-V4-Pro", upstream: "dmodel", displayName: "DeepSeek-V4-Pro", maxInputTokens: 180_000, vision: true, reasoning: true, price_factor: 0.5 },
+  { id: "qd-DeepSeek-V4-Flash", upstream: "dfmodel", displayName: "DeepSeek-V4-Flash", maxInputTokens: 180_000, vision: true, reasoning: true, price_factor: 0.1 },
+  { id: "qd-GLM-5.1", upstream: "gm51model", displayName: "GLM-5.1", maxInputTokens: 180_000, vision: true, reasoning: true, price_factor: 0.6 },
+  { id: "qd-Kimi-K2.6", upstream: "kmodel", displayName: "Kimi-K2.6", maxInputTokens: 256_000, vision: true, reasoning: false, price_factor: 0.3 },
+  { id: "qd-MiniMax-M2.7", upstream: "mmodel", displayName: "MiniMax-M2.7", maxInputTokens: 180_000, vision: true, reasoning: false, price_factor: 0.2 },
 ] as const;
 
 const MODEL_CONFIGS: Record<string, QoderModelDef> = Object.fromEntries(
@@ -310,13 +341,43 @@ function createToolCallId(): string {
   return `call_${crypto.randomBytes(12).toString("hex")}`;
 }
 
+/**
+ * Generate OpenAI-style tool call ID.
+ * OpenAI uses format: "call_" + 24 alphanumeric characters
+ */
+function generateOpenAIToolId(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = 'call_';
+  for (let i = 0; i < 24; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+/**
+ * Normalize tool call ID to OpenAI format.
+ * OpenAI uses simple alphanumeric IDs like "call_abc123...", not Anthropic's "toolu_*" format.
+ * If the upstream ID is too short, generate a new one.
+ */
+function normalizeToolCallId(id: string | undefined, index: number): string {
+  if (!id) {
+    return generateOpenAIToolId();
+  }
+  // Strip Anthropic prefix if present (for compatibility)
+  if (id.startsWith("toolu_")) {
+    id = id.slice(6);
+  }
+  // If ID is too short (< 20 chars after stripping), generate a new one
+  if (id.length < 20) {
+    return generateOpenAIToolId();
+  }
+  return id;
+}
+
 function generateMachineIdentity(): Pick<QoderTokens, "machineId" | "machineToken" | "machineType"> {
   const machineId = crypto.randomUUID();
-  const machineToken = Buffer.from(
-    (crypto.randomUUID() + crypto.randomUUID()).slice(0, 50),
-    "ascii",
-  ).toString("base64url");
-  const machineType = crypto.randomUUID().replace(/-/g, "").slice(0, 18);
+  const machineToken = machineId;
+  const machineType = "5";
   return { machineId, machineToken, machineType };
 }
 
@@ -344,11 +405,11 @@ function buildSessionContext(identity: AuthIdentity): SessionContext {
 function buildPayloadB64(info: string): string {
   return Buffer.from(
     JSON.stringify({
+      version: "v1",
+      requestId: crypto.randomUUID(),
+      info,
       cosyVersion: COSY_VERSION,
       ideVersion: "",
-      info,
-      requestId: crypto.randomUUID(),
-      version: "v1",
     }),
     "utf8",
   ).toString("base64");
@@ -462,32 +523,36 @@ async function bearerFetch(tokens: QoderTokens, opts: BearerCallOptions): Promis
   const pathSig = pathSigFromUrl(opts.url);
   const signature = signBearerRequest(payloadB64, session.cosyKey, cosyDate, encodedBody, pathSig);
 
+  const machineId = tokens.machineId;
+  const machineToken = tokens.machineToken || machineId;
   const headers: Record<string, string> = {
-    "cosy-data-policy": "AGREE",
-    "content-type": "application/json",
-    "cosy-machinetype": tokens.machineType,
+    "cosy-data-policy": "agree",
+    "cosy-machinetype": "5",
     "cosy-clienttype": "5",
     "cosy-date": cosyDate,
     "cosy-user": tokens.userId || "",
     "cosy-key": session.cosyKey,
     "cache-control": "no-cache",
-    accept: method === "GET" ? "application/json" : "text/event-stream",
-    "cosy-clientip": "169.254.198.161",
+    "cosy-business-product": BUSINESS_PRODUCT,
+    "cosy-business-type": BUSINESS_TYPE,
+    "cosy-scene": COSY_SCENE,
+    accept: opts.stream ? "text/event-stream" : "application/json",
     authorization: `Bearer COSY.${payloadB64}.${signature}`,
     "accept-encoding": "identity",
     "cosy-version": COSY_VERSION,
-    "cosy-machineid": tokens.machineId,
-    "cosy-machinetoken": tokens.machineToken,
+    "cosy-machineid": machineId,
+    "cosy-machinetoken": machineToken,
     "login-version": "v2",
     "user-agent": "Go-http-client/2.0",
+    ...(opts.extraHeaders || {}),
   };
 
-  return fetch(opts.url, {
-    method,
-    signal: opts.signal,
-    headers,
-    ...(method === "POST" && encodedBody ? { body: encodedBody } : {}),
-  });
+  const init: RequestInit = { method, signal: opts.signal, headers };
+  if (method !== "GET") {
+    headers["content-type"] = "application/json";
+    init.body = encodedBody;
+  }
+  return fetch(opts.url, init);
 }
 
 function normalizeImageBlock(block: MessageContentPart): OpenAIImageUrlPart | MessageContentPart {
@@ -600,26 +665,45 @@ function rawHasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
-function buildToolSystemPrompt(tools: OpenAITool[]): string {
-  const toolDescriptions = tools
-    .map((tool) => {
-      const properties = isRecord(tool.function.parameters)
-        && isRecord(tool.function.parameters.properties)
-        ? Object.keys(tool.function.parameters.properties)
-        : [];
-      const params = properties.length > 0 ? ` Parameters: ${properties.join(", ")}` : "";
-      return `- ${tool.function.name}: ${tool.function.description || "No description"}${params}`;
-    })
-    .join("\n");
-
-  const names = tools.map((tool) => tool.function.name).join(", ");
-  return `You are a helpful assistant with access to the following tools:\n\n${toolDescriptions}\n\n## Tool Usage Guidelines:\n\n1. When the user's request requires tool output, call the appropriate tool instead of refusing.\n2. Trust tool results returned in the conversation and use them in your next response.\n3. For multi-step tasks, gather the necessary tool results before you answer.\n4. If a tool fails, explain that failure and decide the next best step.\n5. Only answer without tool calls when you already have what you need.\n\nAvailable tools: ${names}`;
-}
-
 export function buildQoderMessages(
   request: ChatCompletionRequest,
+  templateMessages?: unknown[] | undefined,
+  hasIncomingTools?: boolean,
 ): Array<Record<string, unknown>> {
+  const incomingHasSystem = request.messages.some((m) => m.role === "system");
   const result: Array<Record<string, unknown>> = [];
+
+  if (hasIncomingTools && !incomingHasSystem) {
+    const toolDescriptions = (request.tools || [])
+      .map((t: any) => {
+        const name = t?.function?.name || t?.name;
+        const desc = t?.function?.description || t?.description || "No description";
+        const params = t?.function?.parameters?.properties || t?.parameters?.properties || {};
+        const paramNames = Object.keys(params);
+        const paramInfo = paramNames.length > 0
+          ? ` Parameters: ${paramNames.join(", ")}`
+          : "";
+        return `- ${name}: ${desc}${paramInfo}`;
+      })
+      .filter(Boolean)
+      .join("\n");
+
+    const toolNames = (request.tools || [])
+      .map((t: any) => t?.function?.name || t?.name)
+      .filter(Boolean)
+      .join(", ");
+
+    result.push({
+      role: "system",
+      content: `You are a helpful assistant with access to the following tools:\n\n${toolDescriptions}\n\n## Tool Usage Guidelines:\n\n1. **When to use tools**: When the user's request requires information retrieval, file operations, code execution, or any action that these tools can perform, you MUST call the appropriate tool. Do not say you cannot help; instead, invoke the tool with the correct arguments.\n\n2. **Trust tool results**: After calling a tool, you will receive the tool result in the conversation. The tool result contains the actual data or outcome of the tool execution. Use this information to formulate your response. Do not claim you didn't receive file contents or data if the tool result was provided.\n\n3. **Multi-turn workflows**: For complex tasks requiring multiple tool calls:\n   - Call tools sequentially as needed\n   - Use information from previous tool results to inform subsequent calls\n   - Only respond with your final answer after you have gathered all necessary information\n\n4. **Error handling**: If a tool returns an error or empty result, acknowledge this to the user and suggest alternatives or next steps.\n\n5. **Text-only responses**: Only respond with plain text (without tool calls) when:\n   - No available tool can address the user's request\n   - You already have all the information needed from previous tool results\n   - The user is asking for clarification or a simple answer\n\nAvailable tools: ${toolNames}`,
+    });
+  } else if (!hasIncomingTools && !incomingHasSystem) {
+    result.push({
+      role: "system",
+      content: "You are a helpful AI assistant. Answer the user's questions clearly and concisely. Maintain context from earlier turns in the conversation.",
+    });
+  }
+
   for (const message of request.messages) {
     if (message.role === "tool") {
       result.push({
@@ -729,33 +813,64 @@ export function buildQoderMessages(
 }
 
 /**
- * Derive a stable session_id from conversation messages.
- * Qoder server uses session_id as the key for server-side persisted conversation
- * state (context, tool call records, compaction boundaries). A random UUID per
- * request causes the server to treat every request as a brand-new conversation,
- * making the model "forget" prior context and repeat itself.
+ * Derive a stable session_id from a conversation's ANCHOR (the parts that
+ * don't change as the conversation grows).
  *
- * By hashing all message content into a deterministic UUID, the same
- * conversation always maps to the same session_id while different conversations
- * get different IDs.
+ * Qoder server uses session_id as the key for server-side persisted
+ * conversation state (context, tool call records, compaction boundaries).
+ * The session_id MUST stay constant across every turn of the same chat —
+ * otherwise the server treats each turn as a brand-new conversation, the
+ * model "forgets" prior context, and answers loop or repeat themselves.
+ *
+ * Bug we're fixing: the previous implementation hashed ALL messages, so
+ * every new turn (with one more message appended) produced a different
+ * session_id. Effectively: every turn = new session = no memory.
+ *
+ * Fix: hash only the conversation ANCHOR — everything that's stable across
+ * turns:
+ *   1. All system messages (system prompts don't change mid-conversation)
+ *   2. The FIRST user message (the conversation opener)
+ *
+ * The first user turn is the natural fingerprint of "which conversation
+ * is this." Two different chats almost never start with identical opener
+ * text, so collisions are rare; the same chat always rehashes to the same
+ * value because the anchor never changes.
  */
 function deriveSessionId(messages: ChatCompletionRequest["messages"]): string {
   const hash = crypto.createHash("sha256");
-  for (const msg of messages) {
-    hash.update(msg.role + ":");
-    if (typeof msg.content === "string") {
-      hash.update(msg.content);
-    } else if (Array.isArray(msg.content)) {
-      for (const block of msg.content as any[]) {
+  let firstUserSeen = false;
+
+  const updateWithContent = (content: unknown) => {
+    if (typeof content === "string") {
+      hash.update(content);
+    } else if (Array.isArray(content)) {
+      for (const block of content as any[]) {
         if (block?.type === "text" && typeof block.text === "string") {
           hash.update(block.text);
         }
       }
     }
-    hash.update("\n");
+  };
+
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      hash.update("system:");
+      updateWithContent(msg.content);
+      hash.update("\n");
+    } else if (msg.role === "user" && !firstUserSeen) {
+      hash.update("user:");
+      updateWithContent(msg.content);
+      hash.update("\n");
+      firstUserSeen = true;
+      break;
+    }
   }
+
+  if (!firstUserSeen) {
+    hash.update("__no_user__");
+  }
+
   const hex = hash.digest("hex").slice(0, 32);
-  // Format as valid UUID v4
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
@@ -770,26 +885,7 @@ function buildChatBody(
   const requestId = crypto.randomUUID();
   const chatRecordId = crypto.randomUUID();
   const sessionId = deriveSessionId(request.messages);
-
-  const clientTools = Array.isArray(request.tools) && request.tools.length > 0;
-  const templateTools = Array.isArray(template?.tools) && (template!.tools as unknown[]).length > 0
-    ? (template!.tools as OpenAITool[])
-    : null;
-  const resolvedTools: OpenAITool[] = clientTools ? request.tools! : (templateTools ?? []);
-
-  const systemParts: string[] = [];
-  const nonSystemMessages: ChatCompletionRequest["messages"] = [];
-  for (const message of request.messages) {
-    if (message.role === "system") {
-      systemParts.push(flattenContentToText(message.content));
-    } else {
-      nonSystemMessages.push(message);
-    }
-  }
-  let systemPrompt = systemParts.join("\n\n");
-  if (!systemPrompt && resolvedTools.length > 0) {
-    systemPrompt = buildToolSystemPrompt(resolvedTools);
-  }
+  const hasIncomingTools = Array.isArray(request.tools) && request.tools.length > 0;
 
   const body: Record<string, unknown> = {
     request_id: requestId,
@@ -812,10 +908,9 @@ function buildChatBody(
     agent_id: "agent_common",
     task_id: "common",
     session_type: "cli_craft",
-    aliyun_user_type: tokens.userType || "personal_standard",
-    system: systemPrompt,
-    messages: buildQoderMessages({ ...request, messages: nonSystemMessages }),
-    tools: resolvedTools,
+    aliyun_user_type: "",
+    messages: buildQoderMessages(request, undefined, hasIncomingTools),
+    tools: hasIncomingTools ? request.tools : [],
     parameters: {
       max_tokens: request.max_tokens ?? 8096,
       ...(request.tool_choice !== undefined ? { tool_choice: request.tool_choice } : {}),
@@ -830,11 +925,21 @@ function buildChatBody(
       source: "system",
     },
     business: {
+      product: BUSINESS_PRODUCT,
+      version: BUSINESS_VERSION,
+      type: BUSINESS_TYPE,
       id: crypto.randomUUID(),
-      begin_at: Date.now(),
       name: prompt.slice(0, 30),
+      begin_at: Date.now(),
+      stage: "start",
     },
   };
+
+  // Mirror messages[0] system prompt up to top-level body.system
+  const sysMsg = (body.messages as any[]).find((m: any) => m?.role === "system");
+  if (sysMsg && typeof sysMsg.content === "string") {
+    body.system = sysMsg.content;
+  }
 
   if (images.length > 0) {
     (body.chat_context as Record<string, unknown>).images = images;
@@ -1057,7 +1162,7 @@ function mergeToolCallDelta(
   const index = forcedIndex ?? (typeof raw.index === "number" ? raw.index : fallbackIndex);
   const existing = acc[index] ?? {
     index,
-    id: createToolCallId(),
+    id: normalizeToolCallId(undefined, index),
     type: "function" as const,
     function: {
       name: "",
@@ -1067,7 +1172,7 @@ function mergeToolCallDelta(
 
   const fn = isRecord(raw.function) ? raw.function : {};
   if (typeof raw.id === "string" && raw.id) {
-    existing.id = raw.id;
+    existing.id = normalizeToolCallId(raw.id, index);
   }
   if (typeof fn.name === "string" && fn.name) {
     existing.function.name = fn.name;
@@ -1294,6 +1399,11 @@ class QoderClient {
     const response = await bearerFetch(tokens, {
       url: this.urls.chatUrl,
       body,
+      stream: true,
+      extraHeaders: {
+        "x-model-key": model.upstream,
+        "x-model-source": "system",
+      },
       signal,
     });
 
